@@ -1,0 +1,403 @@
+#!/usr/bin/python3
+# 04/??/2020: V1 - New
+# 04/18/2020: V2 - Add code to create XLSX file; Remove code to create CSV file
+# 10/14/2021: V2.1 - Modify code to see new Wahoo Speed sensor and changes from Elemnt upgrades
+# 10/15/2021: V3.0 - Added code to send email from here (and removed from BASH script)
+# 10/16/2021: v3.1 - Added stop date and time to text message with power levels and changed these msgs slightly
+# 10/23/2021: V3.1 - Moved log write with program name and version to bottom of program and log file.
+# 11/12/2021: V3.1 - Changed name of XLSX-file_name to have 00_ as first characters to sort at top of list
+# 12/15/2021: V3.1 - Change recharge trigger level to 20%
+# 02/27/2022: V3.2 - Added line to text message with ride miles and time
+# 03/06/2022: V3.2 - Very minor change ('DB' to 'database') in a message
+# 03/08/2022: V3.3 - Added code to check specific battery charge thresholds by device"
+# 03/09/2022: V3.3 - Changed power-text message to be two parts - finished_msg & power_text_msg
+# 03/11/2022: V3.35- Fixed a bug introduced in last change where battery level of the ELEMNT wasn't sent
+# 03/18/2022: V3.4 - Added code to send a 'finished' email/text to Heather and me
+# 03/20/2022: V3.5 - Added code to write XLSX file of today's ride to 'dow_Ride' in new folder (dow=3-char weekday) and
+#                    added code to only send emails if ride date is today
+# 03/22/2022: V3.5 - Minor message changes.
+# 04/04/2022: V3.5 - Removed my id from receiving 'finished ride' text email; Moved these to top with other constants
+# 04/06/2022: V3.5 - Added weekday to name of Excel file
+# 06/04/2022: V3.6 - Added and modified code to use common config folder and modules
+# 06/14/2022: V3.6 - Trimmed words from messages.
+# 08/13/2022: V3.61- Added code to decrement shift counts by one.
+# 08/19/2022: V3.62- Added code to import warnings and ignore userwarnings I started to see after my system rebuild.
+# 10/24/2022: V3.7 - Added and modified code to send battery level notify only if a sensor is installed.
+# 12/31/2022: V3.71- Formatting changes for output messages sent via email and displayed
+# 01/02/2023: V3.72- Added feet to ascent and descent report line
+# 01/04/2023: V3.72- Changed KMH to KPH
+# 01/26/2023: V3.73- Changed contents of some messages (combining on one line, removing a line)
+# 01/31/2023: V3.74- Minor change to message with ride start, end, and duration
+# 02/15/2023: V3.75- Changed to use /home/dave/tmp
+
+Program_Version = 3.75
+
+import os
+import sys
+import pymysql
+import warnings
+warnings.simplefilter("ignore", UserWarning)
+import fitdecode
+from datetime import datetime, timezone, timedelta
+import xlsxwriter
+import smtplib, ssl
+sys.path.insert(0, '/home/dave/Python/_Configs')
+import _MySQL
+import _EMail
+
+# Common MySQL database values
+Server = "localhost"
+User = _MySQL.db_user
+UserPassword = _MySQL.db_user_password
+Database = "CyclingData"
+
+# Email Lists
+battery_email = "7409758465@mms.att.net"
+#battery_email = ["7409758465@mms.att.net","dalexnagy@gmail.com"]
+finish_email = "7409734839@mms.att.net"
+#finish_email = ["7409734839@mms.att.net","heatheranagy@gmail.com"]
+
+# File names and folders
+log_file_name = "/home/dave/tmp/FITProc1_Log.txt"
+XLSX_file_folder = "/home/dave/Documents/Spreadsheets/BikeRides/"
+
+# Recharge trigger thresholds
+recharge_thresholds = [["ELEMNT",20], ["Shimano Di2",15]]
+default_threshold = 20
+
+# Bike Sensor Switches
+SpeedSensor_Installed = False
+
+src_file = ""
+
+# Testing
+# Use any of next lines if testing with only one file
+# src_file = "2020/2020-03-20-113004-ELEMNT FAD4-269-0.fit"    # Elemnt at 10%
+# src_file = "2020/2020-03-22-112253-ELEMNT FAD4-271-0.fit"    # Neither below 15%
+# src_file = "2020/2020-07-09-105953-ELEMNT FAD4-359-0.fit"    # Speed Sensor dead
+# src_file = "2021/2021-10-15-130047-ELEMNT FAD4-411-0.fit"         # Normal ride
+# src_file = "2022/2022-12-31-115507-ELEMNT FAD4-692-0.fit"         # Recent Ride
+# And remember to reset the comment indicator!!
+
+log_file = open(log_file_name, "w")
+
+# log_file.write("{} Processing started\n".format(str(datetime.now().strftime("%H:%M:%S"))))
+
+if len(src_file) == 0:
+    # if src_file is not set to a value, search upload folder for files
+    # Upload folder where FIT file is sent directly from Wahoo iPhone app
+    src_dir = "/home/dave/Dropbox/apps/WahooFitness"
+    files = os.listdir(src_dir)
+    files.sort()
+    fit_files = [file for file in files if file[-4:].lower() == '.fit']
+    if len(fit_files) == 0:
+        log_file.write("{} Processing started - NO files found in '"+src_dir+"' - Exiting\n"
+                       .format(str(datetime.now().strftime("%H:%M:%S"))))
+        exit(1)
+    else:
+        log_file.write("{} Processing started for files in '{}'\n"
+                       .format(str(datetime.now().strftime("%H:%M:%S")), src_dir))
+else:
+    # Used for testing 
+    src_dir = "/home/dave/WahooFitness"
+    fit_files = [src_file]
+    log_file.write("{} Processing started for file: '{}/{}'\n"
+                   .format(str(datetime.now().strftime("%H:%M:%S")), src_dir, src_file))
+
+final_charge = {}
+frame_names = ["device_info", "event", "session"]
+speed_dev_names = ["Wahoo SPEED", "Speed"]
+
+# Connect to database
+db = pymysql.connect(host=Server, user=User, passwd=UserPassword, db=Database, autocommit=True)
+cursor = db.cursor()
+# Get number of rows in table
+cursor.execute("SELECT COUNT(*) FROM RideStats")
+# Fetch a single row using fetchone() method.
+#log_file.write("{} Active database is '{}' on host '{}'\n".format(str(datetime.now().strftime("%H:%M:%S")), Database, Server))
+log_file.write("{} Found {} ride records in '{}' on '{}'\n"
+               .format(str(datetime.now().strftime("%H:%M:%S")), str(cursor.fetchone()[0]),Database, Server))
+
+file_ctr = 0
+
+for fit_file in fit_files:
+    file_ctr += 1
+    log_file.write("{} File #{:4d} - {}\n".format(str(datetime.now().strftime("%H:%M:%S")), file_ctr, fit_file))
+    print("{} Processing File #{:4d} - {}".format(str(datetime.now().strftime("%H:%M:%S")), file_ctr, fit_file))
+    sql = "SELECT FileName FROM RideStats WHERE FileName = '{}'".format(fit_file)
+    cursor.execute(sql)
+
+    # Get number of rows retrieved
+    FIT_File_in_DB = cursor.rowcount
+    full_fit_file = src_dir+"/"+fit_file
+
+    # reset counters
+    front_gear_changes = 0
+    rear_gear_changes = 0
+    frame_no = 0
+    device_info_frames = 0
+    Wahoo_Speed_frames = 0
+
+    # Process FIT file frames
+    with fitdecode.FitReader(full_fit_file) as fit_frame:
+        try:
+            for frame in fit_frame:
+                frame_no += 1
+
+                if isinstance(frame, fitdecode.FitDataMessage):
+                    try:
+                        name_idx = frame_names.index(frame.name)
+                    except ValueError:
+                        name_idx = -1
+
+                    if name_idx > -1:
+                        # 'event' frame has gear change events reported by DI2
+                        if frame.name == "event":
+                            fields = frame.fields
+                            for f in fields:
+                                if f.value == "rear_gear_change":
+                                    rear_gear_changes += 1
+                                if f.value == "front_gear_change":
+                                    front_gear_changes += 1
+
+                        # 'session' frame has end-of-ride statistics
+                        if frame.name == "session":
+                            fields = frame.fields
+                            for f in fields:
+                                if f.name == "timestamp":
+                                    stop_time = f.value
+                                elif f.name == 'start_time':
+                                    start_time = f.value
+                                elif f.name == "total_elapsed_time":
+                                    elapsed_time_secs = f.value
+                                elif f.name == "total_timer_time":
+                                    ride_time_secs = f.value
+                                elif f.name == "avg_speed":
+                                    avg_speed_meters = f.value
+                                elif f.name == "max_speed":
+                                    max_speed_meters = f.value
+                                elif f.name == "total_distance":
+                                    ride_distance_meters = f.value
+                                elif f.name == "min_altitude":
+                                    min_altitude_meters = f.value
+                                elif f.name == "max_altitude":
+                                    max_altitude_meters = f.value
+                                elif f.name == "max_neg_grade":
+                                    max_neg_grade_pct = f.value
+                                elif f.name == "max_pos_grade":
+                                    max_pos_grade_pct = f.value
+                                elif f.name == "total_ascent":
+                                    total_ascent_meters = f.value
+                                elif f.name == "total_descent":
+                                    total_descent_meters = f.value
+
+                        # 'device_info' has battery charge information
+                        if frame.name == "device_info":
+                            fields = frame.fields
+                            device_info_frames += 1
+                            for flds in fields:
+                                Dev_Charge_Str = ""
+                                Description = ""
+                                Product_Name = ""
+                                for f in fields:
+                                    if f.name == "charge":
+                                        if f.value is None:
+                                            Dev_Charge_Str = "N/A"
+                                        else:
+                                            try:
+                                                Dev_Charge_Str = str(f.value)
+                                            except (TypeError, ValueError):
+                                                Dev_Charge_Str = "????"
+                                    elif f.name == 'descriptor':
+                                        if f.value is None:
+                                            Description = "----"
+                                        else:
+                                            Description = f.value
+                                    elif f.name == "product_name":
+                                        if f.value is None:
+                                            Product_Name = "----"
+                                        else:
+                                            Product_Name = f.value
+                                    elif f.name == "timestamp":
+                                        Dev_Time = f.value
+
+                                    # Check if this frame is for the Wahoo Speed Sensor
+                                    if f.name == "product_name" and f.value in speed_dev_names:
+                                        Wahoo_Speed_frames += 1
+
+                                if Dev_Charge_Str != "" and Dev_Charge_Str != "N/A":
+                                    final_charge[Product_Name] = [Dev_Time, Dev_Charge_Str]
+
+# Added 08/13/2022:
+            rear_gear_changes -= 1
+            front_gear_changes -= 1
+#
+            log_file.write("{} Frame processing completed - \n".format(str(datetime.now().strftime("%H:%M:%S"))))
+            log_file.write("    {:<16} {} to {} ({})\n"
+                           .format("Start/End:",
+                                   start_time.replace(tzinfo=timezone.utc).astimezone(tz=None).strftime("%b %d, %Y @ %H:%M:%S"),
+                                   stop_time.replace(tzinfo=timezone.utc).astimezone(tz=None).strftime("%H:%M:%S"),
+                                   timedelta(seconds=elapsed_time_secs)))
+            log_file.write("    {:<16} {:.2f} mi ({:,.2f} km) in {}\n"
+                           .format("Distance:", ride_distance_meters / 1609.344, ride_distance_meters / 1000,
+                                   str(timedelta(seconds=ride_time_secs))))
+            log_file.write("    {:<16} Avg: {:.2f} MPH ({:.2f} KPH)  Max:  {:.2f} MPH ({:.2f} KPH)\n"
+                           .format("Speed:", avg_speed_meters * 2.236936, (avg_speed_meters / 1000) * 3600,
+                                   max_speed_meters * 2.236936, (max_speed_meters / 1000) * 3600))
+            log_file.write("    {:<16} Max: {:.2f} ft ({:.2f} m)    Min: {:.2f} ft ({:.2f} m)\n"
+                           .format("Altitude:", max_altitude_meters * 3.28084, max_altitude_meters,
+                                   min_altitude_meters * 3.28084, min_altitude_meters))
+            log_file.write("    {:<16} {:d} ft ({:d} m) @ {:.1f}% / {:d} ft ({:d} m) @ {:.1f}%\n"
+                           .format("Ascent/Descent:", int(total_ascent_meters * 3.28084), int(total_ascent_meters), max_pos_grade_pct,
+                                   int(total_descent_meters * 3.28084), int(total_descent_meters), max_neg_grade_pct))
+            log_file.write("    {:<16} F:{:d} / R:{:d}\n"
+                           .format("Gear Changes:", front_gear_changes, rear_gear_changes))
+            
+            log_file.write("    {:<14}\n".format("Battery Status:"))
+            # Begin building message to be sent to my phone via text
+            finished_msg = "{}\n".format(stop_time.replace(tzinfo=timezone.utc).astimezone(tz=None)
+                                           .strftime("%b %d, %Y @ %H:%M:%S"))
+            finished_msg = finished_msg + "Rode {:.2f} mi in {}\n".format(ride_distance_meters / 1609.344, str(timedelta(seconds=ride_time_secs))) 
+            # print("--- finished_msg ---\n",finished_msg)
+            power_text_msg = ""
+                                           
+            for key in final_charge:
+                threshold = default_threshold
+                for t_key in recharge_thresholds:
+                    #print("key=",key,"t_key[0]=",t_key[0],"t_key[1]=",t_key[1])
+                    if key == t_key[0]:
+                        #print("Found ",key,"==",t_key[0], "Threshold=",t_key[1])
+                        threshold = t_key[1]
+                #print("Recharge threshold for ",key,"is",threshold)
+                log_file.write("      {}: {}%".format(key, final_charge[key][1]))
+                power_text_msg = power_text_msg + "{}: {}%".format(key, final_charge[key][1])
+                if int(final_charge[key][1]) <= threshold:
+                    log_file.write(" --RECHARGE!")
+                    power_text_msg = power_text_msg + " --RECHARGE!"                    
+                log_file.write("\n")
+                power_text_msg = power_text_msg + "\n"
+                #print("power_text_msg=",power_text_msg)
+            if SpeedSensor_Installed:    
+                log_file.write("      -- Speed: ")
+                power_text_msg = power_text_msg + "Speed: "
+                if Wahoo_Speed_frames == 0:
+                    log_file.write("DEAD")
+                    power_text_msg = power_text_msg + "DEAD"
+                elif device_info_frames/10 > Wahoo_Speed_frames:
+                    log_file.write("Very Low")
+                    power_text_msg = power_text_msg + "Very Low"
+                else:
+                    log_file.write("OK")
+                    power_text_msg = power_text_msg + "OK"
+                log_file.write("\n")
+                power_text_msg = power_text_msg + "\n"
+                # print("--- power_text_msg ---\n",power_text_msg)
+            
+            if FIT_File_in_DB == 0:
+                sql = "INSERT INTO RideStats (FileName, StartTime, EndTime, RideTimeSecs, TotalTimeSecs, " \
+                      "TotalDistMeters, SpeedMaxMetersSec, SpeedAvgMetersSec, AltitudeMaxMeters, AltitudeMinMeters, " \
+                      "AscentMeters, AscentGradePct, DescentMeters, DescentGradePct, FrontGearChanges, " \
+                      "RearGearChanges, " \
+                      "FinalElemntCharge, FinalDI2Charge) \
+                      VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                try:
+                    start_time_mysql = start_time.replace(tzinfo=timezone.utc).astimezone(tz=None).strftime(
+                        '%Y-%m-%d %H:%M:%S')
+                    stop_time_mysql = stop_time.replace(tzinfo=timezone.utc).astimezone(tz=None).strftime(
+                        '%Y-%m-%d %H:%M:%S')
+                    insertList = [fit_file, start_time_mysql, stop_time_mysql, ride_time_secs,
+                                  elapsed_time_secs,
+                                  ride_distance_meters, max_speed_meters, avg_speed_meters, max_altitude_meters,
+                                  min_altitude_meters, total_ascent_meters, max_pos_grade_pct,
+                                  total_descent_meters,
+                                  max_neg_grade_pct, front_gear_changes, rear_gear_changes,
+                                  final_charge['ELEMNT'][1], final_charge['Shimano Di2'][1]]
+                    cursor.execute(sql, insertList)
+                    log_file.write("{} Database was updated from '{}'\n"
+                                   .format(str(datetime.now().strftime("%H:%M:%S")), fit_file))
+                except pymysql.IntegrityError:
+                    log_file.write("{} Failure when adding data for: '{}'\n"
+                                   .format(str(datetime.now().strftime("%H:%M:%S")), fit_file))
+            else:
+                log_file.write("{} File '{}' had been processed - No new data added to database\n"
+                               .format(str(datetime.now().strftime("%H:%M:%S")), fit_file))
+
+            # Set workbook and worksheet parameters and formats
+            
+            XLSX_file_name = XLSX_file_folder + "{}-{}_Ride.XLSX".format(start_time.date().strftime("%w"),start_time.date().strftime("%a"))
+            workbook = xlsxwriter.Workbook(XLSX_file_name, {'remove_timezone': True})
+            worksheet = workbook.add_worksheet()
+            # Set formats used in this worksheet
+            number_format = workbook.add_format({'num_format': '##0.00'})
+            date_format = workbook.add_format({'num_format': 'mm/dd/yyyy'})
+            time_format = workbook.add_format({'num_format': 'HH:MM AM/PM'})
+            elapsed_format = workbook.add_format({'num_format': 'HH:MM:SS'})
+            start_date_excel = start_time.date()
+            start_time_excel = start_time.replace(tzinfo=timezone.utc).astimezone(tz=None).time()
+
+            # Set widths and formats for columns
+            worksheet.set_column(0, 0, 10)  # Column  A
+            worksheet.set_column(1, 1, 8)   # Column  B
+            worksheet.set_column(2, 2, 8)   # Column  C
+            worksheet.set_column(3, 3, 6)   # Column  D
+            worksheet.set_column(4, 4, 8)   # Column  E
+            worksheet.write(0, 0, start_date_excel, date_format)
+            worksheet.write(0, 1, start_time_excel, time_format)
+            worksheet.write(0, 2, "Synapse")
+            worksheet.write(0, 3, ride_distance_meters/1609.344, number_format)
+            worksheet.write(0, 4, timedelta(seconds=ride_time_secs), elapsed_format)
+            workbook.close()
+            log_file.write("{} Today's ride data written to '{}'\n"
+                           .format(str(datetime.now().strftime("%H:%M:%S")), XLSX_file_name))
+
+        except AssertionError:
+            log_file.write("Assertion error on frame #{:d} in file {}\n".format(frame_no, fit_file))
+
+# Setup Email connection and message
+port = 587  # For starttls
+smtp_server = "smtp.gmail.com"
+sender_email = _EMail.email_user
+password = _EMail.email_password
+message = """Subject: Ride Completed!
+
+"""
+context = ssl.create_default_context()
+
+# Only send email/text messages if ride completed today
+if datetime.now().date() == start_time.date():
+    # Send 'finished' email
+    message = message + finished_msg
+    with smtplib.SMTP(smtp_server, port) as server:
+        server.starttls(context=context)
+        server.login(sender_email, password)
+        server.sendmail(sender_email, finish_email, message)
+
+    log_file.write("{} 'Ride Finished' Email/text sent to '{}'\n"
+                   .format(str(datetime.now().strftime("%H:%M:%S")), finish_email))
+
+    # Send 'battery levels' email
+    message = message + power_text_msg
+    with smtplib.SMTP(smtp_server, port) as server:
+        server.starttls(context=context)
+        server.login(sender_email, password)
+        server.sendmail(sender_email, battery_email, message)
+
+    log_file.write("{} 'Battery Status' Email/text sent to '{}'\n"
+                   .format(str(datetime.now().strftime("%H:%M:%S")), battery_email))
+else:
+    log_file.write("{} Email/text messages NOT sent because ride did not start today\n"
+                   .format(str(datetime.now().strftime("%H:%M:%S"))))
+        
+print("{} Completed!  {:,} Files found, {:,} Frames processed"
+      .format(str(datetime.now().strftime("%H:%M:%S")), file_ctr, frame_no))
+log_file.write("{} Completed!  {:,} File(s) found, {:,} Frames processed\n"
+               .format(str(datetime.now().strftime("%H:%M:%S")), file_ctr, frame_no))
+# Show program name and version in log
+log_file.write("{} [Program {} V{}] Ended\n".format(str(datetime.now().strftime("%H:%M:%S")),sys.argv[0],Program_Version))
+
+# disconnect from database server
+cursor.close()
+db.close()
+# close log file
+log_file.close()
+exit(0)
