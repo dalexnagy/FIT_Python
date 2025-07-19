@@ -76,8 +76,9 @@
 # 2025-07-10: V5.18- Changed location of log file to 'Logs/FIT'
 # 2025-07-11: N/C  - Changed DI2 recharge trigger limit to 25%
 # 2025-07-18: V5.20- Changed to import values for text message receiver & API code
+# 2025-07-19: V5.21- Fixed error introduced when I moved text message values to an included file
 
-Program_Version = 5.20
+Program_Version = 5.21
 
 import os
 import sys
@@ -483,23 +484,19 @@ context = ssl._create_unverified_context()
 # Only send email/text messages if ride completed today
 if datetime.now().date() == start_time.date():
     # Send text message if the list or variable has value(s)
-    if len(text_msg_receiver) > 0:
+    if len(_TextMsg.textmsg_receiver) > 0:
         # Send 'finished' message
         message = "Bike Ride Completed!\n\n" + finished_msg
-        #with smtplib.SMTP(smtp_server, port) as server:
-        #    server.starttls(context=context)
-        #    server.login(_EMail.email_user, _EMail.email_password)
-        #    server.sendmail(_EMail.email_user, finish_email, message)
         resp = requests.post('https://textbelt.com/text', {
-            'phone': text_msg_receiver,
+            'phone': _TextMsg.textmsg_receiver,
             'message': message,
-            'key': textbelt_key,
+            'key': _TextMsg.textbelt_key,
         })
         if resp.status_code == 200:
             resp_data = resp.json()
             if resp_data['success'] is True:
                 log_file.write("{} 'Ride Finished' text was sent to '{}'.  Remaining quota: {} messages\n"
-                               .format(str(datetime.now().strftime("%H:%M:%S")), text_msg_receiver,
+                               .format(str(datetime.now().strftime("%H:%M:%S")), _TextMsg.textmsg_receiver,
                                        resp_data['quotaRemaining']))
                 log_file.write("{} 'Ride Finished' message contents (between dashes):\n{}\n{}\n{}\n"
                                .format(str(datetime.now().strftime("%H:%M:%S")), dashes, message, dashes))
@@ -540,7 +537,7 @@ print("{} Completed!  {:,} Files found, {:,} Frames processed"
 log_file.write("{} Completed!  {:,} File(s) found, {:,} Frames processed\n"
                .format(str(datetime.now().strftime("%H:%M:%S")), file_ctr, frame_no))
 # Show program name and version in log
-log_file.write("{} [Program {} V{}] Ended\n".format(str(datetime.now().strftime("%H:%M:%S")),
+log_file.write("{} [Program {} V{}] Ended\n\n".format(str(datetime.now().strftime("%H:%M:%S")),
                                                     sys.argv[0], Program_Version))
 
 # disconnect from database server
