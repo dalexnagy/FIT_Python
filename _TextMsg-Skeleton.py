@@ -3,6 +3,6 @@
 #
 # Receiver
 # Could be list enclosed in []
-text_msg_receiver = "<Phone Number>"
+textmsg_receiver = "<Phone Number>"
 # API Code for service provider
 textbelt_key = "API Code from service provider"
